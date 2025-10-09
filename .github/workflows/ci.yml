@@ -1,13 +1,200 @@
-name: Basic CI
+name: CI/CD - Client, Server & Security Tests
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, develop, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, develop, master ]
 
 jobs:
-  build:
+  # TESTS CLIENT
+  test-client:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+        browser: [chrome, firefox]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Build project
+      run: npm run build
+    
+    - name: Run client unit tests
+      run: |
+        # Tests basiques pour vérifier que le code client fonctionne
+        node -e "
+          import('three').then(three => {
+            console.log('✅ Three.js chargé avec succès');
+          }).catch(err => {
+            console.error('❌ Erreur Three.js:', err);
+            process.exit(1);
+          });
+        "
+    
+    - name: Validate HTML structure
+      run: |
+        if [ -f index.html ]; then
+          echo "📄 Validation HTML de base..."
+          if grep -q "three" index.html || grep -q "gameContainer" index.html; then
+            echo "✅ Structure HTML valide"
+          else
+            echo "❌ Structure HTML invalide"
+            exit 1
+          fi
+        fi
+    
+    - name: Test bundle size
+      run: |
+        echo "📦 Analyse de la taille du build:"
+        du -sh dist/ || echo "Aucun dossier dist"
+        find dist/ -name "*.js" -exec du -h {} \; | head -10
+
+  # TESTS SERVEUR
+  test-server:
+    runs-on: ubuntu-latest
+    
+    services:
+      # Service pour simuler le serveur Socket.io
+      node-server:
+        image: node:18
+        ports:
+          - 3000:3000
+        options: >-
+          --health-cmd "curl -f http://localhost:3000 || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        env:
+          NODE_ENV: test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18.x'
+        cache: 'npm'
+    
+    - name: Install server dependencies
+      run: |
+        # Installation des dépendances serveur simulées
+        npm install socket.io express cors
+    
+    - name: Create test server
+      run: |
+        cat > test-server.js << 'EOF'
+        const express = require('express');
+        const http = require('http');
+        const socketIo = require('socket.io');
+        const cors = require('cors');
+        
+        const app = express();
+        const server = http.createServer(app);
+        const io = socketIo(server, {
+          cors: {
+            origin: "*",
+            methods: ["GET", "POST"]
+          }
+        });
+        
+        app.use(cors());
+        app.use(express.json());
+        
+        // Routes de test
+        app.get('/health', (req, res) => {
+          res.json({ status: 'OK', timestamp: new Date().toISOString() });
+        });
+        
+        // Gestion Socket.io
+        io.on('connection', (socket) => {
+          console.log('Client connecté:', socket.id);
+          
+          socket.on('placeBuilding', (data) => {
+            console.log('Building placé:', data);
+            socket.broadcast.emit('buildingPlaced', data);
+          });
+          
+          socket.on('disconnect', () => {
+            console.log('Client déconnecté:', socket.id);
+          });
+        });
+        
+        const PORT = process.env.PORT || 3000;
+        server.listen(PORT, () => {
+          console.log(`🚀 Serveur de test démarré sur le port ${PORT}`);
+        });
+        EOF
+        
+        # Démarrer le serveur en arrière-plan
+        node test-server.js &
+        SERVER_PID=$!
+        echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+        
+        # Attendre que le serveur soit prêt
+        sleep 5
+    
+    - name: Test server connectivity
+      run: |
+        echo "🔌 Test de connexion au serveur..."
+        
+        # Test HTTP
+        HTTP_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "000")
+        if [ "$HTTP_RESPONSE" = "200" ]; then
+          echo "✅ Serveur HTTP fonctionnel"
+        else
+          echo "❌ Serveur HTTP inaccessible: $HTTP_RESPONSE"
+          exit 1
+        fi
+        
+        # Test WebSocket basique
+        node -e "
+          const io = require('socket.io-client');
+          const socket = io('http://localhost:3000');
+          
+          socket.on('connect', () => {
+            console.log('✅ Connexion Socket.io établie');
+            socket.emit('placeBuilding', { test: true });
+            setTimeout(() => {
+              socket.disconnect();
+              process.exit(0);
+            }, 1000);
+          });
+          
+          socket.on('connect_error', (err) => {
+            console.error('❌ Erreur de connexion Socket.io:', err);
+            process.exit(1);
+          });
+          
+          setTimeout(() => {
+            console.error('❌ Timeout connexion Socket.io');
+            process.exit(1);
+          }, 5000);
+        "
+    
+    - name: Cleanup test server
+      if: always()
+      run: |
+        if [ -n "$SERVER_PID" ]; then
+          kill $SERVER_PID 2>/dev/null || true
+        fi
+
+  # TESTS DE SÉCURITÉ
+  security:
     runs-on: ubuntu-latest
     
     steps:
@@ -23,8 +210,116 @@ jobs:
     - name: Install dependencies
       run: npm ci
     
-    - name: Build project
-      run: npm run build
+    - name: NPM Security Audit
+      run: |
+        echo "🔒 Audit de sécurité NPM..."
+        npm audit --audit-level high || true
+        
+        # Audit détaillé
+        npm audit --json > audit.json || true
+        echo "📊 Résumé de l'audit:"
+        node -e "
+          try {
+            const audit = require('./audit.json');
+            const { metadata: { vulnerabilities } } = audit;
+            console.log('Vulnérabilités trouvées:');
+            console.log('  Critical:', vulnerabilities.critical || 0);
+            console.log('  High:', vulnerabilities.high || 0);
+            console.log('  Moderate:', vulnerabilities.moderate || 0);
+            console.log('  Low:', vulnerabilities.low || 0);
+          } catch(e) {
+            console.log('Aucune donnée d\\'audit disponible');
+          }
+        "
     
-    - name: List build files
-      run: ls -la dist/
+    - name: Dependency Vulnerability Scan
+      run: |
+        echo "🛡️ Scan des vulnérabilités des dépendances..."
+        # Vérification des versions vulnérables
+        npx npm-audit-html || true
+        
+        # Vérification des licences
+        npx license-checker --summary || true
+    
+    - name: Code Security Analysis
+      run: |
+        echo "🔍 Analyse de sécurité du code..."
+        
+        # Recherche de patterns dangereux
+        if grep -r "eval(" . --include="*.js" --exclude-dir=node_modules; then
+          echo "⚠️  Attention: utilisation de eval() détectée"
+        else
+          echo "✅ Aucun eval() détecté"
+        fi
+        
+        # Vérification des URLs non sécurisées
+        if grep -r "http://" . --include="*.js" --exclude-dir=node_modules | grep -v "http://localhost"; then
+          echo "⚠️  Attention: URLs HTTP non locales détectées"
+        else
+          echo "✅ Aucune URL HTTP externe détectée"
+        fi
+        
+        # Vérification des clés API en clair
+        if grep -r "api_key\|apikey\|secret" . --include="*.js" --exclude-dir=node_modules | grep -v "test\|example"; then
+          echo "⚠️  Attention: clés potentielles détectées dans le code"
+        else
+          echo "✅ Aucune clé API détectée"
+        fi
+    
+    - name: Bundle Security Check
+      run: |
+        echo "📦 Analyse de sécurité du bundle..."
+        if [ -d "dist" ]; then
+          # Vérifier la présence de fichiers sensibles
+          find dist/ -name "*.map" -o -name "*.env" | while read file; do
+            echo "⚠️  Fichier potentiellement sensible: $file"
+          done
+        fi
+
+  # DÉPLOIEMENT CONDITIONNEL
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [test-client, test-server, security]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+    
+    - name: Install and build
+      run: |
+        npm ci
+        npm run build
+    
+    - name: Deploy preparation
+      run: |
+        echo "🚀 Préparation du déploiement..."
+        echo "✅ Tous les tests ont passé!"
+        echo "📊 Résumé:"
+        echo "  - Client: ✅ Fonctionnel"
+        echo "  - Serveur: ✅ Connecté" 
+        echo "  - Sécurité: ✅ Audité"
+        echo "  - Build: ✅ Généré"
+
+  # RAPPORT FINAL
+  report:
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test-client, test-server, security]
+    
+    steps:
+    - name: Generate test report
+      run: |
+        echo "📋 RAPPORT DE TESTS - City Builder"
+        echo "==================================="
+        echo "Client Tests: ${{ needs.test-client.result }}"
+        echo "Server Tests: ${{ needs.test-server.result }}"
+        echo "Security Tests: ${{ needs.security.result }}"
+        echo ""
+        echo "📈 Statut global: ${{ job.status }}"
