@@ -276,12 +276,14 @@ class BuildingManager {
         this.editMode = false;
         this.buildingToEdit = null;
         this.selectionBox = null;
+        this.movingBuilding = null;
     }
 
     setSelectedBuilding(type) {
         this.selectedBuildingType = type;
         this.editMode = false;
         this.buildingToEdit = null;
+        this.movingBuilding = null;
         this.hideSelectionBox();
         this.showPreview(0, 0, type);
     }
@@ -290,6 +292,7 @@ class BuildingManager {
         this.selectedBuildingType = null;
         this.editMode = false;
         this.buildingToEdit = null;
+        this.movingBuilding = null;
         this.hidePreview();
         this.hideSelectionBox();
     }
@@ -498,9 +501,33 @@ class BuildingManager {
             this.editMode = true;
             this.buildingToEdit = building;
             this.selectedBuildingType = null;
+            this.movingBuilding = null;
             this.hidePreview();
             this.showSelectionBox(building);
+            
+            const event = new CustomEvent('buildingEditStarted', { 
+                detail: { building: building } 
+            });
+            document.dispatchEvent(event);
+            
+            return true;
         }
+        return false;
+    }
+
+    startMoveBuilding(buildingId) {
+        const building = this.buildings.get(buildingId);
+        if (building) {
+            this.movingBuilding = building;
+            this.editMode = true;
+            this.buildingToEdit = building;
+            this.selectedBuildingType = building.type;
+            this.hideSelectionBox();
+            this.showPreview(building.x, building.z, building.type);
+            
+            return true;
+        }
+        return false;
     }
 
     showSelectionBox(building) {
@@ -537,15 +564,23 @@ class BuildingManager {
             const gridWidth = Math.ceil(config.width / this.gridSystem.cellSize);
             const gridDepth = Math.ceil(config.depth / this.gridSystem.cellSize);
 
+            // Vérifier si la nouvelle position est différente
+            if (building.x === newX && building.z === newZ) {
+                throw new Error('Le bâtiment est déjà à cette position');
+            }
+
             // Vérifier si la nouvelle position est valide
             if (!this.gridSystem.isValidPosition(newX, newZ, gridWidth, gridDepth)) {
-                throw new Error('Nouvel emplacement invalide');
+                throw new Error('Nouvel emplacement déjà occupé ou invalide');
             }
 
             // Libérer l'ancienne position
             this.gridSystem.freeCell(building.x, building.z, building.gridWidth, building.gridDepth);
 
             // Mettre à jour la position
+            const oldX = building.x;
+            const oldZ = building.z;
+            
             building.x = newX;
             building.z = newZ;
             building.gridWidth = gridWidth;
@@ -558,20 +593,25 @@ class BuildingManager {
             const worldPos = this.gridSystem.gridToWorld(newX, newZ);
             building.mesh.position.set(worldPos.x, 0, worldPos.z);
 
-            // Mettre à jour la boîte de sélection si elle est visible
-            if (this.selectionBox) {
-                this.selectionBox.position.set(worldPos.x, config.height / 2, worldPos.z);
-            }
-
             this.socket.emit('moveBuilding', {
                 buildingId: buildingId,
+                oldX: oldX,
+                oldZ: oldZ,
                 newX: newX,
                 newZ: newZ,
                 playerId: building.playerId
             });
 
+            // Réinitialiser les états après le déplacement
+            this.movingBuilding = null;
+            this.editMode = false;
+            this.buildingToEdit = null;
+            this.selectedBuildingType = null;
+            this.hidePreview();
+
             return building;
         }
+        throw new Error('Bâtiment non trouvé');
     }
 
     getBuildingAtPosition(x, z) {
@@ -598,7 +638,6 @@ class UIManager {
         this.updateResourceDisplay();
         this.setupBuildingInfo();
         this.setupEventListeners();
-        this.setupEditControls();
     }
 
     updateResourceDisplay() {
@@ -645,29 +684,11 @@ class UIManager {
             });
         });
 
-        // Boutons d'édition
-        const deleteBtn = document.getElementById('delete-building');
-        const moveBtn = document.getElementById('move-building');
-        const cancelEditBtn = document.getElementById('cancel-edit');
-
-        if (deleteBtn) {
-            deleteBtn.addEventListener('click', () => {
-                const event = new CustomEvent('deleteBuilding');
-                document.dispatchEvent(event);
-            });
-        }
-
-        if (moveBtn) {
-            moveBtn.addEventListener('click', () => {
-                const event = new CustomEvent('startMoveBuilding');
-                document.dispatchEvent(event);
-            });
-        }
-
-        if (cancelEditBtn) {
-            cancelEditBtn.addEventListener('click', () => {
-                const event = new CustomEvent('cancelEdit');
-                document.dispatchEvent(event);
+        // Bouton d'annulation de construction
+        const cancelBtn = document.getElementById('cancel-placement');
+        if (cancelBtn) {
+            cancelBtn.addEventListener('click', () => {
+                this.deselectAllBuildings();
             });
         }
 
@@ -683,10 +704,22 @@ class UIManager {
                 this.deselectAllBuildings();
             }
         });
-    }
 
-    setupEditControls() {
-        // Ces contrôles seront affichés quand un bâtiment est sélectionné
+        // Délégation d'événements pour les boutons d'édition dynamiques
+        document.addEventListener('click', (e) => {
+            if (e.target.id === 'delete-building' || e.target.closest('#delete-building')) {
+                const event = new CustomEvent('deleteBuilding');
+                document.dispatchEvent(event);
+            }
+            else if (e.target.id === 'move-building' || e.target.closest('#move-building')) {
+                const event = new CustomEvent('startMoveBuilding');
+                document.dispatchEvent(event);
+            }
+            else if (e.target.id === 'cancel-edit' || e.target.closest('#cancel-edit')) {
+                const event = new CustomEvent('cancelEdit');
+                document.dispatchEvent(event);
+            }
+        });
     }
 
     selectBuilding(buildingType) {
@@ -724,11 +757,26 @@ class UIManager {
                     <h4>${config.name} - Édition</h4>
                     <p><strong>Position :</strong> ${buildingData.x}, ${buildingData.z}</p>
                     <p><strong>Taille :</strong> ${config.width}x${config.depth}</p>
+                    <p><strong>Coût :</strong> ${config.cost.money}💰 ${config.cost.materials}🔧</p>
+                    <p><em>Choisissez une action :</em></p>
                 </div>
                 <div class="edit-controls">
-                    <button id="move-building" class="edit-btn move-btn">📦 Déplacer</button>
-                    <button id="delete-building" class="edit-btn delete-btn">🗑️ Supprimer</button>
-                    <button id="cancel-edit" class="edit-btn cancel-btn">✖ Annuler</button>
+                    <button id="move-building" class="edit-btn move-btn">
+                        <span>📦</span>
+                        <span>Déplacer</span>
+                    </button>
+                    <button id="delete-building" class="edit-btn delete-btn">
+                        <span>🗑️</span>
+                        <span>Supprimer</span>
+                    </button>
+                    <button id="cancel-edit" class="edit-btn cancel-edit-btn">
+                        <span>✖</span>
+                        <span>Fermer</span>
+                    </button>
+                </div>
+                <div class="edit-instructions">
+                    <p><small>💡 <strong>Déplacement :</strong> Cliquez sur "Déplacer" puis sur la nouvelle position</small></p>
+                    <p><small>💡 <strong>Annuler :</strong> Clic droit pendant le déplacement</small></p>
                 </div>
             `;
         }
@@ -742,16 +790,27 @@ class UIManager {
                 <div class="controls-info">
                     <h4>Commandes</h4>
                     <ul class="controls-list">
-                        <li>🖱️ Clic gauche : Sélectionner / Placer</li>
-                        <li>🖱️ Clic droit : Désélectionner</li>
-                        <li>🖱️ Clic sur bâtiment : Éditer</li>
+                        <li>🖱️ Clic gauche vide : Construire</li>
+                        <li>🖱️ Clic gauche bâtiment : Éditer</li>
+                        <li>🖱️ Clic droit : Désélectionner / Annuler</li>
                         <li>🔄 Rotation : Clic gauche + glisser</li>
-                        <li>📦 Déplacement : Clic droit + glisser</li>
+                        <li>📦 Déplacement caméra : Clic droit + glisser</li>
                         <li>📜 Molette : Zoom</li>
                         <li>⎋ Echap : Annuler</li>
                     </ul>
                 </div>
+                <button id="cancel-placement" class="cancel-btn">
+                    ✖ Annuler la construction
+                </button>
             `;
+
+            // Réattacher l'événement au bouton d'annulation
+            const cancelBtn = document.getElementById('cancel-placement');
+            if (cancelBtn) {
+                cancelBtn.addEventListener('click', () => {
+                    this.deselectAllBuildings();
+                });
+            }
         }
     }
 
@@ -761,6 +820,11 @@ class UIManager {
     }
 
     showMessage(message, type = 'info') {
+        // Supprimer les notifications existantes
+        document.querySelectorAll('.notification').forEach(notification => {
+            notification.remove();
+        });
+
         const notification = document.createElement('div');
         notification.className = `notification ${type}`;
         notification.textContent = message;
@@ -768,7 +832,7 @@ class UIManager {
             position: fixed;
             top: 24px;
             right: 24px;
-            background: ${type === 'error' ? '#ff6b6b' : '#4ecdc4'};
+            background: ${type === 'error' ? '#ff6b6b' : type === 'success' ? '#4cd964' : '#8b9dff'};
             color: white;
             padding: 12px 20px;
             border-radius: 8px;
@@ -778,7 +842,11 @@ class UIManager {
         `;
 
         document.body.appendChild(notification);
-        setTimeout(() => notification.remove(), 3000);
+        setTimeout(() => {
+            if (notification.parentNode) {
+                notification.remove();
+            }
+        }, 3000);
     }
 }
 
@@ -796,6 +864,7 @@ class CityBuilderGame {
         this.uiManager = null;
         this.currentHoverPos = null;
         this.movingBuilding = null;
+        this.editingBuilding = null;
         
         this.init();
     }
@@ -903,12 +972,22 @@ class CityBuilderGame {
         // Événements de sélection de bâtiment
         document.addEventListener('buildingSelected', (e) => {
             this.buildingManager.setSelectedBuilding(e.detail.type);
+            this.movingBuilding = null;
+            this.editingBuilding = null;
         });
 
         document.addEventListener('buildingCancelled', () => {
             this.buildingManager.clearSelection();
             this.currentHoverPos = null;
             this.movingBuilding = null;
+            this.editingBuilding = null;
+        });
+
+        // Événement quand l'édition d'un bâtiment commence
+        document.addEventListener('buildingEditStarted', (e) => {
+            this.editingBuilding = e.detail.building;
+            this.movingBuilding = null;
+            this.uiManager.showEditPanel(e.detail.building);
         });
 
         // Événements d'édition
@@ -916,20 +995,26 @@ class CityBuilderGame {
             if (this.buildingManager.buildingToEdit) {
                 this.buildingManager.removeBuilding(this.buildingManager.buildingToEdit.id);
                 this.buildingManager.clearSelection();
+                this.editingBuilding = null;
                 this.uiManager.showMessage('Bâtiment supprimé', 'success');
+                this.uiManager.updateInfoPanel();
             }
         });
 
         document.addEventListener('startMoveBuilding', () => {
             if (this.buildingManager.buildingToEdit) {
-                this.movingBuilding = this.buildingManager.buildingToEdit;
-                this.uiManager.showMessage('Cliquez sur une nouvelle position pour déplacer le bâtiment', 'info');
+                if (this.buildingManager.startMoveBuilding(this.buildingManager.buildingToEdit.id)) {
+                    this.movingBuilding = this.buildingManager.buildingToEdit;
+                    this.uiManager.showMessage('Cliquez sur une nouvelle position pour déplacer le bâtiment. Clic droit pour annuler.', 'info');
+                }
             }
         });
 
         document.addEventListener('cancelEdit', () => {
             this.buildingManager.clearSelection();
             this.movingBuilding = null;
+            this.editingBuilding = null;
+            this.uiManager.updateInfoPanel();
         });
 
         // Gestion du survol de la souris
@@ -942,6 +1027,17 @@ class CityBuilderGame {
             this.handleClick(event);
         });
 
+        // Gestion du clic droit pour annuler le déplacement
+        this.renderer.domElement.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            if (this.movingBuilding) {
+                this.buildingManager.clearSelection();
+                this.movingBuilding = null;
+                this.uiManager.showMessage('Déplacement annulé', 'info');
+                this.uiManager.updateInfoPanel();
+            }
+        });
+
         // Redimensionnement
         window.addEventListener('resize', () => {
             this.camera.aspect = window.innerWidth / window.innerHeight;
@@ -949,7 +1045,6 @@ class CityBuilderGame {
             this.renderer.setSize(window.innerWidth, window.innerHeight);
         });
 
-        // Empêcher le menu contextuel
         this.renderer.domElement.addEventListener('contextmenu', (e) => {
             e.preventDefault();
         });
@@ -976,7 +1071,7 @@ class CityBuilderGame {
                 
                 // Mode déplacement de bâtiment
                 if (this.movingBuilding) {
-                    this.buildingManager.updatePreview(gridPos.x, gridPos.z, this.movingBuilding.type);
+                    this.buildingManager.updatePreview(gridPos.x, gridPos.z);
                 }
                 // Mode construction normale
                 else if (this.buildingManager.selectedBuildingType) {
@@ -999,20 +1094,24 @@ class CityBuilderGame {
                 );
                 this.uiManager.showMessage('Bâtiment déplacé avec succès!', 'success');
                 this.movingBuilding = null;
-                this.buildingManager.clearSelection();
+                this.uiManager.updateInfoPanel();
             } catch (error) {
                 this.uiManager.showMessage(error.message, 'error');
             }
             return;
         }
 
-        // Vérifier si on clique sur un bâtiment existant
-        const building = this.buildingManager.getBuildingAtPosition(this.currentHoverPos.x, this.currentHoverPos.z);
-        if (building) {
-            // Éditer le bâtiment existant
-            this.buildingManager.startEditBuilding(building.id);
-            this.uiManager.showEditPanel(building);
-            return;
+        // Vérifier si on clique sur un bâtiment existant (uniquement si pas en mode construction)
+        if (!this.buildingManager.selectedBuildingType) {
+            const building = this.buildingManager.getBuildingAtPosition(this.currentHoverPos.x, this.currentHoverPos.z);
+            if (building) {
+                // Éditer le bâtiment existant
+                if (this.buildingManager.startEditBuilding(building.id)) {
+                    this.editingBuilding = building;
+                    this.uiManager.showEditPanel(building);
+                }
+                return;
+            }
         }
 
         // Mode construction normale
