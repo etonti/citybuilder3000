@@ -10,6 +10,7 @@ jobs:
   # TESTS CLIENT
   test-client:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     
     strategy:
       matrix:
@@ -25,7 +26,20 @@ jobs:
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
+<<<<<<< HEAD
     
+=======
+        cache-dependency-path: './client/package-lock.json'
+
+    - name: Cache node_modules
+      uses: actions/cache@v4
+      with:
+        path: ./client/node_modules
+        key: client-${{ runner.os }}-node-${{ hashFiles('**/client/package-lock.json') }}
+        restore-keys: |
+          client-${{ runner.os }}-node-
+
+>>>>>>> 21b6ef2 (nouveau test)
     - name: Install dependencies
       run: npm ci
     
@@ -62,6 +76,7 @@ jobs:
         du -sh dist/ || echo "Aucun dossier dist"
         find dist/ -name "*.js" -exec du -h {} \; | head -10
 
+<<<<<<< HEAD
   # TESTS SERVEUR
   test-server:
     runs-on: ubuntu-latest
@@ -196,10 +211,35 @@ jobs:
   # TESTS DE SÉCURITÉ
   security:
     runs-on: ubuntu-latest
+=======
+    - name: Run tests with coverage
+      run: npm run test:coverage --if-present
+
+    - name: Run linter
+      run: npm run lint --if-present
+
+    - name: Build client
+      run: npm run build --if-present
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: client-build
+        path: client/dist/
+        retention-days: 1
+
+  # ... (mêmes améliorations pour test-server)
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    continue-on-error: true
+>>>>>>> 21b6ef2 (nouveau test)
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+<<<<<<< HEAD
     
     - name: Setup Node.js
       uses: actions/setup-node@v4
@@ -323,3 +363,21 @@ jobs:
         echo "Security Tests: ${{ needs.security.result }}"
         echo ""
         echo "📈 Statut global: ${{ job.status }}"
+=======
+
+    - name: Generate security report
+      run: |
+        echo "## 🔍 Security Audit Report" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### Client Dependencies" >> $GITHUB_STEP_SUMMARY
+        cd client && npm audit --audit-level=high >> ../$GITHUB_STEP_SUMMARY 2>&1 || echo "❌ High/critical vulnerabilities found" >> ../$GITHUB_STEP_SUMMARY
+        
+        echo "### Server Dependencies" >> $GITHUB_STEP_SUMMARY
+        cd ../server && npm audit --audit-level=high >> ../$GITHUB_STEP_SUMMARY 2>&1 || echo "❌ High/critical vulnerabilities found" >> ../$GITHUB_STEP_SUMMARY
+
+        echo "### Resolution Commands" >> $GITHUB_STEP_SUMMARY
+        echo '```bash' >> $GITHUB_STEP_SUMMARY
+        echo 'npm audit fix --prefix ./client' >> $GITHUB_STEP_SUMMARY
+        echo 'npm audit fix --prefix ./server' >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+>>>>>>> 21b6ef2 (nouveau test)
